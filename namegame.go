@@ -11,10 +11,11 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
 	"github.com/esimov/pigo/core"
 	"github.com/nlopes/slack"
 	"github.com/pkg/errors"
+	"regexp"
+	"unicode"
 )
 
 type Player struct {
@@ -32,7 +33,6 @@ const (
 	ENDGAME Actions = 3
 	//NOTIFY  Actions = 4
 	OPTION Actions = 5
-
 	NOSTATE           UserState = 6
 	WAITINGFORCOMMAND UserState = 7
 	WAITINGFORGUESS   UserState = 8
@@ -77,6 +77,8 @@ var (
 	whichAction = map[string]Actions{
 		"begin": PLAY,
 		"go":    PLAY,
+		"hello": PLAY,
+		"hi":	 PLAY,
 		"now":   PLAY,
 		"play":  PLAY,
 		"start": PLAY,
@@ -135,16 +137,11 @@ var (
 
 func main() {
 	api.SetDebug(true)
-
 	rtm := api.NewRTM()
 	go rtm.ManageConnection()
-
 	stillRunning := true
-
 	filterUsers()
-
 	rand.Seed(time.Now().UnixNano())
-
 	for stillRunning {
 		select {
 		case msg := <-rtm.IncomingEvents:
@@ -152,25 +149,19 @@ func main() {
 			switch ev := msg.Data.(type) {
 			case *slack.ConnectedEvent:
 				fmt.Println("Connection Counter:", ev.ConnectionCount)
-
 			case *slack.MessageEvent:
 				fmt.Printf("Message: %v\n", ev)
 				info := rtm.GetInfo()
-
 				_, playerExists := players[ev.User]
-
 				if !playerExists && ev.User != info.User.ID {
 					players[ev.User] = &Player{0, 0, 0, -1, NOSTATE, rand.Perm(len(directory))}
 				}
 				respondToText(rtm, ev)
-
 			case *slack.RTMError:
 				fmt.Printf("Error: %s\n", ev.Error())
-
 			case *slack.InvalidAuthEvent:
 				fmt.Printf("Invalid Credentials")
 				stillRunning = false
-
 			default:
 				fmt.Printf("Chugging Along")
 			}
@@ -183,9 +174,10 @@ func respondToText(rtm *slack.RTM, msg *slack.MessageEvent) {
 	var params slack.PostMessageParameters
 	var slice []slack.Attachment
 	text := strings.ToLower(msg.Text)
-
+	text = strings.TrimFunc(text, func(r rune) bool {
+		return !unicode.IsLetter(r)
+	})
 	user := players[msg.User]
-
 	switch user.state {
 	case NOSTATE:
 		response = "hey there! i'm namegame and i'm here to help you learn the names of your coworkers. type and enter go to start."
@@ -200,12 +192,11 @@ func respondToText(rtm *slack.RTM, msg *slack.MessageEvent) {
 			}
 			goodFace, err := facePresent(userProfile)
 			if err != nil {
-				fmt.Println(err)
+				fmt.Println(err.Error())
 			}
 			if !goodFace && err == nil {
 				var params slack.PostMessageParameters
 				var slice []slack.Attachment
-
 				slice = append(slice, slack.Attachment{
 					Color:    "f80909",
 					Title:    "MIGHT WANNA CHANGE THIS",
@@ -241,9 +232,7 @@ func respondToText(rtm *slack.RTM, msg *slack.MessageEvent) {
 					},
 				},
 			})
-
 			params.Attachments = slice
-
 			response = "here are your scores, see you around."
 			rtm.PostMessage(msg.Channel, "score", params)
 			rtm.SendMessage(rtm.NewOutgoingMessage(response, msg.Channel))
@@ -252,8 +241,8 @@ func respondToText(rtm *slack.RTM, msg *slack.MessageEvent) {
 			user.SetCorrect(0)
 			user.SetIncorrect(0)
 			user.SetState(NOSTATE)
-		//case NOTIFY:
-		//	sendNotifications(rtm, msg)
+			//case NOTIFY:
+			//	sendNotifications(rtm, msg)
 		case OPTION:
 			response = "PLAY: enter go,start, 1, etc... to begin the game" +
 				"\nEND: enter stop, no, bye, etc... to end the game" +
@@ -262,6 +251,9 @@ func respondToText(rtm *slack.RTM, msg *slack.MessageEvent) {
 		default:
 			if strings.Contains(text, "show") {
 				directoryLookUp(rtm, msg)
+			} else {
+				response = "hey friend! enter 'go' to start playing."
+				rtm.SendMessage(rtm.NewOutgoingMessage(response, msg.Channel))
 			}
 		}
 	case WAITINGFORGUESS:
@@ -296,9 +288,7 @@ func respondToText(rtm *slack.RTM, msg *slack.MessageEvent) {
 					},
 				},
 			})
-
 			params.Attachments = slice
-
 			response = "here are your scores, see you around."
 			rtm.PostMessage(msg.Channel, "score", params)
 			rtm.SendMessage(rtm.NewOutgoingMessage(response, msg.Channel))
@@ -347,7 +337,6 @@ func containsDuplicates(check slack.User, dir []slack.User) bool {
 
 func containsName(text string, msg *slack.MessageEvent) bool {
 	user := players[msg.User]
-
 	return strings.Contains(strings.ToLower(directory[user.rightAnswer].Profile.FirstName), text) ||
 		strings.Contains(strings.ToLower(directory[user.rightAnswer].Profile.LastName), text) ||
 		strings.Contains(strings.ToLower(directory[user.rightAnswer].Profile.DisplayName), text) ||
@@ -358,10 +347,8 @@ func continuousPlay(rtm *slack.RTM, msg *slack.MessageEvent, rightAnswer int) {
 	var params slack.PostMessageParameters
 	var slice []slack.Attachment
 	var response string
-
 	display := directory[rightAnswer]
 	user := players[msg.User]
-
 	slice = append(slice, slack.Attachment{
 		Color:    "4094d1",
 		Title:    "guess who",
@@ -370,7 +357,6 @@ func continuousPlay(rtm *slack.RTM, msg *slack.MessageEvent, rightAnswer int) {
 	params.Attachments = slice
 	rtm.PostMessage(msg.Channel, "", params)
 	user.SetState(WAITINGFORGUESS)
-
 	switch user.round {
 	case 0:
 		response = "*here's a hint: if you don't know the name, enter 'idk', 'dunno', 'give up', etc... to get the answer.*"
@@ -387,12 +373,19 @@ func continuousPlay(rtm *slack.RTM, msg *slack.MessageEvent, rightAnswer int) {
 
 func directoryLookUp(rtm *slack.RTM, msg *slack.MessageEvent) {
 	text := strings.ToLower(msg.Text)
+	text = strings.TrimFunc(text, func(r rune) bool {
+		return !unicode.IsLetter(r)
+	})
 
 	for _, user := range directory {
-		if strings.Contains(text, strings.ToLower(user.Profile.FirstName)) ||
-			strings.Contains(text, strings.ToLower(user.Profile.LastName)) ||
-			strings.Contains(text, strings.ToLower(user.Profile.DisplayName)) ||
-			strings.Contains(text, strings.ToLower(user.Profile.RealName)) {
+		firstName := regexp.MustCompile(strings.ToLower(user.Profile.RealName))
+		lastName := regexp.MustCompile(strings.ToLower(user.Profile.LastName))
+		displayName := regexp.MustCompile(strings.ToLower(user.Profile.DisplayName))
+		fullName := regexp.MustCompile(strings.ToLower(user.Profile.RealName))
+		if firstName.MatchString(text) ||
+			lastName.MatchString(text) ||
+			displayName.MatchString(text) ||
+			fullName.MatchString(text) {
 			sendBio(rtm, msg, user)
 			return
 		}
@@ -405,38 +398,27 @@ func facePresent(user *slack.User) (bool, error) {
 	if err != nil {
 		log.Fatalf("Error reading the cascade file: %v", err)
 	}
-
 	sourceFile, err := http.Get(user.Profile.Image192)
 	if err != nil {
-		log.Printf("Failed to fetch image: %s", user.Profile.Image192)
 		return false, errors.New("failed to fetch image")
 	}
 	defer sourceFile.Body.Close()
-
 	file, err := os.Create(user.ID)
 	if err != nil {
-		log.Printf("Failed to create file: %s", user.ID)
 		return false, errors.New("failed to create file")
 	}
-
 	_, err = io.Copy(file, sourceFile.Body)
 	if err != nil {
-		log.Printf("Failed to copy file")
 		return false, errors.New("failed to copy file")
 	}
-
 	defer os.Remove(file.Name())
 	file.Close()
-
 	src, err := pigo.GetImage(file.Name())
 	if err != nil {
-		log.Printf("Failed to GetImage")
 		return false, errors.New("failed to GetImage")
 	}
-
 	pixels := pigo.RgbToGrayscale(src)
 	cols, rows := src.Bounds().Max.X, src.Bounds().Max.Y
-
 	cParams := pigo.CascadeParams{
 		MinSize:     *minSize,
 		MaxSize:     *maxSize,
@@ -449,31 +431,24 @@ func facePresent(user *slack.User) (bool, error) {
 		Cols:   cols,
 		Dim:    cols,
 	}
-
 	picture := pigo.NewPigo()
-
 	// Unpack the binary file. This will return the number of cascade trees,
 	// the tree depth, the threshold and the prediction from tree's leaf nodes.
 	classifier, err := picture.Unpack(cascadeFile)
 	if err != nil {
-		log.Printf("Error unpacking the cascade file: %s", err)
 		return false, errors.New("failed to unpack the cascade file")
 	}
-
 	// Run the classifier over the obtained leaf nodes and return the detection results.
 	// The result contains quadruplets representing the row, column, scale and detection score.
 	details := classifier.RunCascade(imgParams, cParams)
-
 	if len(details) > 0 {
 		return true, nil
 	}
-
 	return false, nil
 }
 
 func filterUsers() {
 	temp, _ := api.GetUsers()
-
 	for _, user := range temp {
 		goodFace, err := facePresent(&user)
 		if err != nil {
@@ -503,11 +478,9 @@ func filterUsers() {
 //		"\n3. " + strconv.Itoa(third.correct-third.incorrect)
 //	rtm.SendMessage(rtm.NewOutgoingMessage(response, msg.Channel))
 //}
-
 func sendBio(rtm *slack.RTM, msg *slack.MessageEvent, user slack.User) {
 	var params slack.PostMessageParameters
 	var slice []slack.Attachment
-
 	slice = append(slice, slack.Attachment{
 		Color:    "f9dc1b",
 		Title:    user.RealName,
